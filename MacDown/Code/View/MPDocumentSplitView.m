@@ -7,6 +7,7 @@
 //
 
 #import "MPDocumentSplitView.h"
+#import "MPPreferences.h"
 
 
 @implementation NSColor (Equality)
@@ -70,6 +71,7 @@
     left.frame = NSMakeRect(0.0, 0.0, leftWidth, left.frame.size.height);
     right.frame = NSMakeRect(leftWidth + dividerThickness, 0.0,
                              rightWidth, right.frame.size.height);
+    
     [self setPosition:leftWidth ofDividerAtIndex:0];
 }
 

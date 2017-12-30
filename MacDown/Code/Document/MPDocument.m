@@ -193,7 +193,10 @@ typedef NS_ENUM(NSUInteger, MPWordCountType) {
 @property (copy, nonatomic) NSString *autosaveName;
 @property (strong) HGMarkdownHighlighter *highlighter;
 @property (strong) MPRenderer *renderer;
-@property CGFloat previousSplitRatio;
+/// Used to restore a collapsed pane to it's previous uncollapsed state
+@property (nonatomic) CGFloat uncollapsedSplitRatio;
+/// Used to ensure that restarts always maintain the previous ratio
+@property (nonatomic) CGFloat currentSplitRatio;
 @property BOOL manualRender;
 @property BOOL copying;
 @property BOOL printing;
@@ -278,6 +281,20 @@ static void (^MPGetPreviewLoadingCompletionHandler(MPDocument *doc))()
     return (self.preview.frame.size.width != 0.0);
 }
 
+- (void)setCurrentSplitRatio:(CGFloat)currentSplitRatio {
+    _currentSplitRatio = currentSplitRatio;
+
+    [NSUserDefaults.standardUserDefaults setObject:@(currentSplitRatio) forKey:@"currentSplitRatio"];
+    [NSUserDefaults.standardUserDefaults synchronize];
+}
+
+- (void)setUncollapsedSplitRatio:(CGFloat)uncollapsedSplitRatio {
+    _uncollapsedSplitRatio = uncollapsedSplitRatio;
+    
+    [NSUserDefaults.standardUserDefaults setObject:@(uncollapsedSplitRatio) forKey:@"uncollapsedSplitRatio"];
+    [NSUserDefaults.standardUserDefaults synchronize];
+}
+
 - (BOOL)editorVisible
 {
     return (self.editorContainer.frame.size.width != 0.0);
@@ -338,7 +355,12 @@ static void (^MPGetPreviewLoadingCompletionHandler(MPDocument *doc))()
 
     self.isPreviewReady = NO;
     self.shouldHandleBoundsChange = YES;
-    self.previousSplitRatio = -1.0;
+    
+    NSNumber *ratio = [NSUserDefaults.standardUserDefaults objectForKey:@"currentSplitRatio"];
+    self.currentSplitRatio = (ratio) ? (CGFloat)[ratio doubleValue] : -1.0;
+    
+    ratio = [NSUserDefaults.standardUserDefaults objectForKey:@"uncollapsedSplitRatio"];
+    self.uncollapsedSplitRatio = (ratio) ? (CGFloat)[ratio doubleValue] : -1.0;
     
     return self;
 }
@@ -351,6 +373,8 @@ static void (^MPGetPreviewLoadingCompletionHandler(MPDocument *doc))()
 - (void)windowControllerDidLoadNib:(NSWindowController *)controller
 {
     [super windowControllerDidLoadNib:controller];
+    
+    CGFloat dividerPosition = self.currentSplitRatio;
 
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
 
@@ -407,6 +431,9 @@ static void (^MPGetPreviewLoadingCompletionHandler(MPDocument *doc))()
                    name:MPDidRequestEditorSetupNotification object:nil];
     [center addObserver:self selector:@selector(didRequestPreviewReload:)
                    name:MPDidRequestPreviewRenderNotification object:nil];
+    [center addObserver:self selector:@selector(windowDidResize:)
+                   name:NSWindowDidResizeNotification object:self.splitView.window];
+    
     if (kCFCoreFoundationVersionNumber >= kCFCoreFoundationVersionNumber10_9)
     {
         [center addObserver:self selector:@selector(previewDidLiveScroll:)
@@ -441,6 +468,11 @@ static void (^MPGetPreviewLoadingCompletionHandler(MPDocument *doc))()
         [self setupEditor:nil];
         [self redrawDivider];
         [self reloadFromLoadedString];
+        
+        // Because we are setting up the editor after the views have been loaded, it
+        // causes the editor to be layed out before we have a chance to switch the editor
+        // to the right. This means that the stored ratio would be applied to the wrong configuration
+        [self setSplitViewDividerLocation:dividerPosition];
     }];
 }
 
@@ -652,7 +684,6 @@ static void (^MPGetPreviewLoadingCompletionHandler(MPDocument *doc))()
     else if (action == @selector(togglePreviewPane:))
     {
         NSMenuItem *it = ((NSMenuItem *)item);
-        it.hidden = (!self.previewVisible && self.previousSplitRatio < 0.0);
         it.title = self.previewVisible ?
             NSLocalizedString(@"Hide Preview Pane",
                               @"Toggle preview pane menu item") :
@@ -672,13 +703,18 @@ static void (^MPGetPreviewLoadingCompletionHandler(MPDocument *doc))()
     return result;
 }
 
-
 #pragma mark - NSSplitViewDelegate
 
 - (void)splitViewDidResizeSubviews:(NSNotification *)notification
 {
     [self redrawDivider];
     self.editor.editable = self.editorVisible;
+    
+    // If this is being resized by the splitview, update the split ratio
+    if (notification.userInfo[@"NSSplitViewDividerIndex"] != nil) {
+        CGFloat newRatio = self.splitView.dividerLocation;
+        self.currentSplitRatio = newRatio;
+    }
 }
 
 
@@ -1130,6 +1166,11 @@ static void (^MPGetPreviewLoadingCompletionHandler(MPDocument *doc))()
     self.lastPreviewScrollTop = contentView.bounds.origin.y;
 }
 
+- (void)windowDidResize:(NSNotification *)notification
+{
+    // Force the split view to layout view parts to help reduce unintended frame movements
+    [self.splitView setDividerLocation:self.splitView.dividerLocation];
+}
 
 #pragma mark - KVO
 
@@ -1150,6 +1191,9 @@ static void (^MPGetPreviewLoadingCompletionHandler(MPDocument *doc))()
         if (self.highlighter.isActive)
             [self setupEditor:keyPath];
         [self redrawDivider];
+        
+        CGFloat newRatio = self.splitView.dividerLocation;
+        self.currentSplitRatio = newRatio;
     }
 }
 
@@ -1417,7 +1461,7 @@ static void (^MPGetPreviewLoadingCompletionHandler(MPDocument *doc))()
             // We don't want to save these values, since they are meaningless.
             // The user should be able to switch between 100% editor and 100%
             // preview without losing the old ratio.
-            self.previousSplitRatio = oldRatio;
+            self.uncollapsedSplitRatio = oldRatio;
         }
         [self setSplitViewDividerLocation:targetRatio];
     }
@@ -1425,10 +1469,10 @@ static void (^MPGetPreviewLoadingCompletionHandler(MPDocument *doc))()
     {
         // We have an inconsistency here, let's just go back to 0.5,
         // otherwise nothing will happen
-        if (self.previousSplitRatio < 0.0)
-            self.previousSplitRatio = 0.5;
+        if (self.uncollapsedSplitRatio < 0.0)
+            self.uncollapsedSplitRatio = 0.5;
 
-        [self setSplitViewDividerLocation:self.previousSplitRatio];
+        [self setSplitViewDividerLocation:self.uncollapsedSplitRatio];
     }
 }
 
@@ -1542,8 +1586,8 @@ static void (^MPGetPreviewLoadingCompletionHandler(MPDocument *doc))()
             || (editorOnRight && subviews[1] == self.preview))
         {
             [self.splitView swapViews];
-            if (!self.previewVisible && self.previousSplitRatio >= 0.0)
-                self.previousSplitRatio = 1.0 - self.previousSplitRatio;
+            if (!self.previewVisible && self.uncollapsedSplitRatio >= 0.0)
+                self.uncollapsedSplitRatio = 1.0 - self.uncollapsedSplitRatio;
 
             // Need to queue this or the views won't be initialised correctly.
             // Don't really know why, but this works.
